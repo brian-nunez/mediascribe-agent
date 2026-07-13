@@ -50,6 +50,9 @@ echo "Design a cache strategy for a social feed" | uv run python main.py
 - The model sees the user question first.
 - The model must call `research_mediascribe` before answering technical questions.
 - The model creates the primary and related search queries for `research_mediascribe`.
+- Search queries should be compact keyword phrases, not full sentences.
+- The tool also keyword-normalizes model queries before calling `/api/search`.
+- Diagnostics include both the original model query and the compact `search_query`.
 - The model also supplies `must_cover` criteria so research can evaluate whether articles are actually useful.
 - Broad architecture questions should use 10 to 14 query angles and fetch 18 to 24 full articles.
 - The CLI rejects attempts that answer without `research_mediascribe` and retries with a stricter instruction.

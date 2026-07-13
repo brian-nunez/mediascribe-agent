@@ -16,12 +16,12 @@ from langchain_openai import ChatOpenAI
 
 
 MEDIASCRIBE_BASE_URL = os.getenv(
-    "MEDIASCRIBE_BASE_URL", "https://mediascribe.b8z.me"
+    "MEDIASCRIBE_BASE_URL",
+    "http://10.0.0.132:9595",  # "https://mediascribe.b8z.me"
 ).rstrip("/")
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("MEDIASCRIBE_TIMEOUT_SECONDS", "20"))
 REQUEST_RETRIES = int(os.getenv("MEDIASCRIBE_REQUEST_RETRIES", "4"))
-REQUEST_RETRY_BASE_SECONDS = float(
-    os.getenv("MEDIASCRIBE_RETRY_BASE_SECONDS", "1.5"))
+REQUEST_RETRY_BASE_SECONDS = float(os.getenv("MEDIASCRIBE_RETRY_BASE_SECONDS", "1.5"))
 DEFAULT_MODEL_BASE_URL = "http://10.0.0.119:8080/v1"
 DEFAULT_MODEL_NAME = "ggml-org/gemma-4-E2B-it-GGUF:Q8_0"
 DIAGNOSTICS_DIR = Path(os.getenv("AGENT_DIAGNOSTICS_DIR", "diagnostics"))
@@ -31,12 +31,16 @@ RESEARCH_SEARCH_LIMIT = int(os.getenv("AGENT_RESEARCH_SEARCH_LIMIT", "20"))
 RESEARCH_DEFAULT_ARTICLES = int(os.getenv("AGENT_RESEARCH_DEFAULT_ARTICLES", "24"))
 RESEARCH_MAX_ARTICLES = int(os.getenv("AGENT_RESEARCH_MAX_ARTICLES", "32"))
 RESEARCH_MIN_GOOD_ARTICLES = int(os.getenv("AGENT_RESEARCH_MIN_GOOD_ARTICLES", "12"))
-RESEARCH_MIN_QUALITY_SCORE = float(os.getenv("AGENT_RESEARCH_MIN_QUALITY_SCORE", "0.35"))
+RESEARCH_MIN_QUALITY_SCORE = float(
+    os.getenv("AGENT_RESEARCH_MIN_QUALITY_SCORE", "0.35")
+)
 RESEARCH_MAX_FETCH_ATTEMPTS = int(os.getenv("AGENT_RESEARCH_MAX_FETCH_ATTEMPTS", "80"))
 RESEARCH_ARTICLE_DELAY_SECONDS = float(
     os.getenv("AGENT_RESEARCH_ARTICLE_DELAY_SECONDS", "0.25")
 )
-RESEARCH_ENFORCEMENT_ATTEMPTS = int(os.getenv("AGENT_RESEARCH_ENFORCEMENT_ATTEMPTS", "4"))
+RESEARCH_ENFORCEMENT_ATTEMPTS = int(
+    os.getenv("AGENT_RESEARCH_ENFORCEMENT_ATTEMPTS", "4")
+)
 
 SESSION = requests.Session()
 SESSION.headers.update(
@@ -126,14 +130,125 @@ def normalize_text_list(value: Any) -> list[str]:
     return normalized
 
 
+QUERY_STOPWORDS = {
+    "about",
+    "against",
+    "also",
+    "and",
+    "architecture",
+    "architecting",
+    "around",
+    "backed",
+    "based",
+    "best",
+    "build",
+    "building",
+    "can",
+    "compare",
+    "considerations",
+    "design",
+    "designing",
+    "detail",
+    "details",
+    "does",
+    "for",
+    "from",
+    "give",
+    "highly",
+    "high-volume",
+    "how",
+    "implementation",
+    "implementing",
+    "into",
+    "large-scale",
+    "like",
+    "make",
+    "need",
+    "on",
+    "patterns",
+    "platform",
+    "please",
+    "recommend",
+    "should",
+    "strategies",
+    "strategy",
+    "system",
+    "systems",
+    "that",
+    "the",
+    "their",
+    "these",
+    "this",
+    "through",
+    "tradeoffs",
+    "using",
+    "vs",
+    "versus",
+    "with",
+    "would",
+}
+
+
+QUERY_SYNONYMS = {
+    "availability": "high availability",
+    "available": "high availability",
+    "highly": "high availability",
+    "mau": "MAU",
+    "qps": "QPS",
+    "rps": "RPS",
+    "cdn": "CDN",
+    "dns": "DNS",
+    "jwt": "JWT",
+    "api": "API",
+    "apis": "API",
+    "redis": "Redis",
+    "postgres": "Postgres",
+    "postgresql": "PostgreSQL",
+    "kafka": "Kafka",
+    "rabbitmq": "RabbitMQ",
+    "sqs": "SQS",
+    "websocket": "WebSocket",
+    "websockets": "WebSocket",
+    "crdt": "CRDT",
+    "crdts": "CRDT",
+    "ot": "OT",
+    "lua": "Lua",
+}
+
+
+def keywordize_query(query: Any, max_terms: int = 8) -> str:
+    text = str(query or "").strip()
+    if not text:
+        return ""
+
+    raw_tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9+#./-]*", text)
+    keywords = []
+    seen = set()
+    for raw_token in raw_tokens:
+        token = raw_token.strip("-_/.,:;()[]{}").lower()
+        if len(token) < 2:
+            continue
+        if token in QUERY_STOPWORDS:
+            continue
+        keyword = QUERY_SYNONYMS.get(token, raw_token)
+        key = keyword.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        keywords.append(keyword)
+        if len(keywords) >= max_terms:
+            break
+
+    return " ".join(keywords) if keywords else text
+
+
 def status(message: str) -> None:
     stream = sys.stderr if PROGRESS_STREAM == "stderr" else sys.stdout
     print(message, file=stream, flush=True)
 
 
 def truncate(value: Any, max_chars: int = 1200) -> str:
-    text = value if isinstance(value, str) else json.dumps(
-        value, ensure_ascii=False)
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     if len(text) <= max_chars:
         return text
     return f"{text[:max_chars]}... [truncated {len(text) - max_chars} chars]"
@@ -200,8 +315,7 @@ def parse_feed_page(page_html: str) -> dict[str, Any]:
     embedded_json = html.unescape(match.group(1))
     payload = json.loads(embedded_json)
     if not isinstance(payload, dict) or not payload.get("page"):
-        raise ValueError(
-            "Mediascribe landing page did not include a feed payload.")
+        raise ValueError("Mediascribe landing page did not include a feed payload.")
 
     return payload
 
@@ -234,8 +348,7 @@ def fetch_blog_api(blog_id: str) -> dict[str, Any]:
     payload = request_json(f"/api/public/blogs/{blog_id}")
     blog = payload.get("blog")
     if not isinstance(blog, dict):
-        raise ValueError(
-            "Mediascribe blog API did not include a blog payload.")
+        raise ValueError("Mediascribe blog API did not include a blog payload.")
     return blog
 
 
@@ -305,7 +418,9 @@ def score_article_quality(
 ) -> dict[str, Any]:
     title = str(article.get("title") or "")
     markdown = str(article.get("markdown") or "")
-    combined = f"{title}\n{article.get('mediascribe_section') or ''}\n{markdown}".lower()
+    combined = f"{title}\n{article.get('mediascribe_section') or ''}\n{
+        markdown
+    }".lower()
     title_lower = title.lower()
     front_matter = f"{title}\n{markdown[:1200]}".lower()
     terms = research_terms(matched_query, all_queries, must_cover)
@@ -384,9 +499,10 @@ def score_article_quality(
 @tool
 def search_mediascribe(query: str, limit: int = 10) -> str:
     """Search Mediascribe source docs. Use this before answering architecture questions."""
-    status(f"Knowledge lookup: {query}")
+    search_query = keywordize_query(query)
+    status(f"Knowledge lookup: {search_query}")
     safe_limit = clamp_int(limit, 1, 20)
-    payload = request_json("/api/search", {"q": query, "limit": safe_limit})
+    payload = request_json("/api/search", {"q": search_query, "limit": safe_limit})
     results = []
 
     for item in payload.get("results", []):
@@ -414,7 +530,8 @@ def search_mediascribe(query: str, limit: int = 10) -> str:
 
     return compact_json(
         {
-            "query": payload.get("query", query),
+            "query": query,
+            "search_query": payload.get("query", search_query),
             "count": len(results),
             "results": results,
         }
@@ -436,19 +553,22 @@ def perform_mediascribe_research(
     queries.extend(related_query_items)
     queries.extend(must_cover_items)
 
-    normalized_queries = []
-    seen_queries = set()
+    query_pairs = []
+    seen_search_queries = set()
     for query in queries:
         clean_query = str(query).strip()
         if not clean_query:
             continue
-        key = clean_query.lower()
-        if key in seen_queries:
+        search_query = keywordize_query(clean_query)
+        if not search_query:
             continue
-        seen_queries.add(key)
-        normalized_queries.append(clean_query)
+        key = search_query.lower()
+        if key in seen_search_queries:
+            continue
+        seen_search_queries.add(key)
+        query_pairs.append({"query": clean_query, "search_query": search_query})
 
-    if not normalized_queries:
+    if not query_pairs:
         return {"error": "primary_query is required"}
 
     search_runs = []
@@ -456,17 +576,25 @@ def perform_mediascribe_research(
     results_by_query = []
     query_limit = clamp_int(RESEARCH_QUERY_LIMIT, 1, 24)
     search_limit = clamp_int(RESEARCH_SEARCH_LIMIT, 1, 20)
-    for query in normalized_queries[:query_limit]:
-        status(f"Knowledge lookup: {query}")
-        payload = request_json("/api/search", {"q": query, "limit": search_limit})
+    active_query_pairs = query_pairs[:query_limit]
+    original_queries = [item["query"] for item in active_query_pairs]
+    search_queries = [item["search_query"] for item in active_query_pairs]
+    scoring_queries = original_queries + search_queries
+    for query_pair in active_query_pairs:
+        query = query_pair["query"]
+        search_query = query_pair["search_query"]
+        status(f"Knowledge lookup: {search_query}")
+        payload = request_json(
+            "/api/search", {"q": search_query, "limit": search_limit}
+        )
         results = (
-            payload.get("results") if isinstance(
-                payload.get("results"), list) else []
+            payload.get("results") if isinstance(payload.get("results"), list) else []
         )
         query_results = []
         search_runs.append(
             {
                 "query": query,
+                "search_query": search_query,
                 "count": len(results),
                 "top_results": [
                     {
@@ -492,6 +620,7 @@ def perform_mediascribe_research(
                 {
                     "score": score,
                     "matched_query": query,
+                    "matched_search_query": search_query,
                     "search_result": item,
                 }
             )
@@ -500,6 +629,7 @@ def perform_mediascribe_research(
                 unique_results[blog_id] = {
                     "score": score,
                     "matched_query": query,
+                    "matched_search_query": search_query,
                     "search_result": item,
                 }
         results_by_query.append(query_results)
@@ -562,8 +692,7 @@ def perform_mediascribe_research(
         if blog_id in attempted_blog_ids:
             continue
         attempted_blog_ids.add(blog_id)
-        title = str(result["search_result"].get(
-            "title") or "untitled article").strip()
+        title = str(result["search_result"].get("title") or "untitled article").strip()
         status(f"Sifting through article: {title}")
         try:
             blog = fetch_blog_api(blog_id)
@@ -574,17 +703,19 @@ def perform_mediascribe_research(
                     "blog_id": blog_id,
                     "title": title,
                     "matched_query": result["matched_query"],
+                    "matched_search_query": result["matched_search_query"],
                     "error": str(exc),
                 }
             )
             continue
         payload = article_payload(blog, language)
         payload["matched_query"] = result["matched_query"]
+        payload["matched_search_query"] = result["matched_search_query"]
         payload["search_score"] = result["score"]
         quality = score_article_quality(
             payload,
             matched_query=result["matched_query"],
-            all_queries=normalized_queries[:query_limit],
+            all_queries=scoring_queries,
             must_cover=must_cover_items,
         )
         payload["quality"] = quality
@@ -598,6 +729,7 @@ def perform_mediascribe_research(
                     "blog_id": blog_id,
                     "title": title,
                     "matched_query": result["matched_query"],
+                    "matched_search_query": result["matched_search_query"],
                     "quality": quality,
                 }
             )
@@ -606,7 +738,10 @@ def perform_mediascribe_research(
         solid_count = sum(
             1 for article in articles if article.get("quality", {}).get("is_solid")
         )
-        if solid_count >= safe_min_good_articles and len(articles) >= safe_min_good_articles:
+        if (
+            solid_count >= safe_min_good_articles
+            and len(articles) >= safe_min_good_articles
+        ):
             break
 
     if not articles and rejected_articles:
@@ -629,18 +764,20 @@ def perform_mediascribe_research(
                 continue
             payload = article_payload(blog, language)
             payload["matched_query"] = result["matched_query"]
+            payload["matched_search_query"] = result["matched_search_query"]
             payload["search_score"] = result["score"]
             payload["quality"] = score_article_quality(
                 payload,
                 matched_query=result["matched_query"],
-                all_queries=normalized_queries[:query_limit],
+                all_queries=scoring_queries,
                 must_cover=must_cover_items,
             )
             payload["fallback_weak_article"] = True
             articles.append(payload)
 
     return {
-        "queries": normalized_queries[:query_limit],
+        "queries": original_queries,
+        "search_queries": search_queries,
         "search_runs": search_runs,
         "articles": articles,
         "rejected_articles": rejected_articles,
@@ -698,8 +835,7 @@ def list_mediascribe_landing_page(limit: int = 10) -> str:
     payload = parse_feed_page(request_text("/"))
     page = payload["page"]
     items = page.get("items") if isinstance(page.get("items"), list) else []
-    sections = page.get("sections") if isinstance(
-        page.get("sections"), list) else []
+    sections = page.get("sections") if isinstance(page.get("sections"), list) else []
 
     articles = []
     for item in items[:safe_limit]:
@@ -765,8 +901,7 @@ def inspect_mediascribe_blog_page(blog_id: str) -> str:
 
     blog = fetch_blog_api(safe_blog_id)
     blog_url = f"{MEDIASCRIBE_BASE_URL}/blog/{blog.get('id')}"
-    languages = blog.get("languages") if isinstance(
-        blog.get("languages"), list) else []
+    languages = blog.get("languages") if isinstance(blog.get("languages"), list) else []
 
     return compact_json(
         {
@@ -997,6 +1132,10 @@ Tool policy:
 - Before any final answer to a technical question, call research_mediascribe.
 - You create the research queries yourself from the user's question.
 - research_mediascribe accepts primary_query, related_queries, must_cover, min_good_articles, and max_articles.
+- Write search queries as compact keyword phrases, not full sentences.
+- Good query shape: 2 to 7 keywords focused on nouns, technologies, patterns, algorithms, constraints, and failure modes.
+- Bad query shape: "architecture for a global social media platform with 500M MAU and high-volume media uploads and feed reads".
+- Good query alternatives: "social media feed scaling", "media upload pipeline", "social graph sharding", "fanout write read", "CDN object storage".
 - For normal technical questions, provide 6 to 10 varied searches and use max_articles=12 to 18.
 - For broad or complex system design questions, provide 10 to 14 varied searches and use max_articles=18 to 24.
 - Provide must_cover criteria that define what a useful article set must contain, such as "conflict resolution", "durable operation log", "database scaling", "failure modes", "observability", or problem-specific subsystems.
@@ -1107,8 +1246,7 @@ def message_tool_calls(message: Any) -> list[dict[str, Any]]:
         if not isinstance(call, dict):
             continue
         function = (
-            call.get("function") if isinstance(
-                call.get("function"), dict) else {}
+            call.get("function") if isinstance(call.get("function"), dict) else {}
         )
         calls.append(
             {
@@ -1265,7 +1403,8 @@ def invoke_agent_with_required_research(
         return last_result, attempts
 
     raise RuntimeError(
-        f"Agent did not call research_mediascribe after {max_attempts} attempts.")
+        f"Agent did not call research_mediascribe after {max_attempts} attempts."
+    )
 
 
 def build_diagnostics(
@@ -1374,8 +1513,7 @@ def main() -> int:
     started = time.perf_counter()
     status("Sifting through files...")
     agent = build_agent()
-    result, research_enforcement = invoke_agent_with_required_research(
-        agent, prompt)
+    result, research_enforcement = invoke_agent_with_required_research(agent, prompt)
     elapsed_seconds = time.perf_counter() - started
     diagnostics = build_diagnostics(
         prompt,
