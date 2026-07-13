@@ -26,6 +26,17 @@ DEFAULT_MODEL_BASE_URL = "http://10.0.0.119:8080/v1"
 DEFAULT_MODEL_NAME = "ggml-org/gemma-4-E2B-it-GGUF:Q8_0"
 DIAGNOSTICS_DIR = Path(os.getenv("AGENT_DIAGNOSTICS_DIR", "diagnostics"))
 PROGRESS_STREAM = os.getenv("AGENT_PROGRESS_STREAM", "stdout").lower()
+RESEARCH_QUERY_LIMIT = int(os.getenv("AGENT_RESEARCH_QUERY_LIMIT", "20"))
+RESEARCH_SEARCH_LIMIT = int(os.getenv("AGENT_RESEARCH_SEARCH_LIMIT", "20"))
+RESEARCH_DEFAULT_ARTICLES = int(os.getenv("AGENT_RESEARCH_DEFAULT_ARTICLES", "24"))
+RESEARCH_MAX_ARTICLES = int(os.getenv("AGENT_RESEARCH_MAX_ARTICLES", "32"))
+RESEARCH_MIN_GOOD_ARTICLES = int(os.getenv("AGENT_RESEARCH_MIN_GOOD_ARTICLES", "12"))
+RESEARCH_MIN_QUALITY_SCORE = float(os.getenv("AGENT_RESEARCH_MIN_QUALITY_SCORE", "0.35"))
+RESEARCH_MAX_FETCH_ATTEMPTS = int(os.getenv("AGENT_RESEARCH_MAX_FETCH_ATTEMPTS", "80"))
+RESEARCH_ARTICLE_DELAY_SECONDS = float(
+    os.getenv("AGENT_RESEARCH_ARTICLE_DELAY_SECONDS", "0.25")
+)
+RESEARCH_ENFORCEMENT_ATTEMPTS = int(os.getenv("AGENT_RESEARCH_ENFORCEMENT_ATTEMPTS", "4"))
 
 SESSION = requests.Session()
 SESSION.headers.update(
@@ -89,6 +100,30 @@ def compact_json(payload: Any) -> str:
 
 def clamp_int(value: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, int(value)))
+
+
+def normalize_text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, str):
+        items = re.split(r"\n|;|,(?=\s*[A-Za-z0-9])", value)
+    else:
+        items = [value]
+
+    normalized = []
+    seen = set()
+    for item in items:
+        text = str(item).strip(" -\t\r\n")
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(text)
+    return normalized
 
 
 def status(message: str) -> None:
@@ -226,6 +261,126 @@ def article_payload(blog: dict[str, Any], language: str = "en") -> dict[str, Any
     }
 
 
+def research_terms(*values: Any) -> list[str]:
+    terms = []
+    seen = set()
+    for value in values:
+        if isinstance(value, list):
+            iterable = value
+        else:
+            iterable = [value]
+        for item in iterable:
+            for token in re.findall(r"[a-zA-Z0-9][a-zA-Z0-9-]{2,}", str(item).lower()):
+                if token in {
+                    "and",
+                    "are",
+                    "for",
+                    "from",
+                    "how",
+                    "into",
+                    "like",
+                    "should",
+                    "system",
+                    "that",
+                    "the",
+                    "this",
+                    "use",
+                    "what",
+                    "when",
+                    "with",
+                }:
+                    continue
+                if token in seen:
+                    continue
+                seen.add(token)
+                terms.append(token)
+    return terms
+
+
+def score_article_quality(
+    article: dict[str, Any],
+    matched_query: str,
+    all_queries: list[str],
+    must_cover: list[str],
+) -> dict[str, Any]:
+    title = str(article.get("title") or "")
+    markdown = str(article.get("markdown") or "")
+    combined = f"{title}\n{article.get('mediascribe_section') or ''}\n{markdown}".lower()
+    title_lower = title.lower()
+    front_matter = f"{title}\n{markdown[:1200]}".lower()
+    terms = research_terms(matched_query, all_queries, must_cover)
+    matched_terms = [term for term in terms if term in combined]
+    title_matches = [term for term in terms if term in title_lower]
+    front_matter_matches = [term for term in terms if term in front_matter]
+    coverage_hits = []
+    exact_phrase_hits = []
+    for item in must_cover:
+        item_terms = research_terms(item)
+        if not item_terms:
+            continue
+        normalized_phrase = " ".join(item_terms)
+        if normalized_phrase and normalized_phrase in combined:
+            exact_phrase_hits.append(item)
+        item_matches = [term for term in item_terms if term in combined]
+        if len(item_terms) <= 2:
+            required_matches = len(item_terms)
+        else:
+            required_matches = max(2, (len(item_terms) * 3 + 3) // 4)
+        if len(item_matches) >= required_matches:
+            coverage_hits.append(item)
+
+    query_phrase_hits = []
+    for query in all_queries:
+        query_terms = research_terms(query)
+        if len(query_terms) < 2:
+            continue
+        normalized_query = " ".join(query_terms)
+        if normalized_query in combined:
+            query_phrase_hits.append(query)
+
+    term_score = len(matched_terms) / max(len(terms), 1)
+    title_score = len(title_matches) / max(min(len(terms), 8), 1)
+    coverage_score = len(coverage_hits) / max(len(must_cover), 1) if must_cover else 0.0
+    length_score = min(len(markdown) / 5000, 1.0)
+    search_score = min(float(article.get("search_score") or 0) / 5, 1.0)
+    score = (
+        (term_score * 0.30)
+        + (title_score * 0.20)
+        + (coverage_score * 0.20)
+        + (length_score * 0.20)
+        + (search_score * 0.10)
+    )
+
+    if must_cover:
+        required_coverage_hits = min(len(must_cover), 3)
+        topic_gate = (
+            bool(exact_phrase_hits)
+            or bool(query_phrase_hits)
+            or (len(front_matter_matches) >= 5 and coverage_score >= 0.5)
+            or (len(title_matches) >= 2 and coverage_score >= 0.5)
+        )
+        relevance_gate = len(coverage_hits) >= required_coverage_hits and topic_gate
+    else:
+        relevance_gate = bool(title_matches) or term_score >= 0.25
+
+    return {
+        "quality_score": round(score, 4),
+        "matched_terms": matched_terms[:20],
+        "title_matches": title_matches[:10],
+        "front_matter_matches": front_matter_matches[:10],
+        "coverage_hits": coverage_hits,
+        "exact_phrase_hits": exact_phrase_hits,
+        "query_phrase_hits": query_phrase_hits[:5],
+        "markdown_chars": len(markdown),
+        "relevance_gate": relevance_gate,
+        "is_solid": (
+            score >= RESEARCH_MIN_QUALITY_SCORE
+            and len(markdown) >= 2500
+            and relevance_gate
+        ),
+    }
+
+
 @tool
 def search_mediascribe(query: str, limit: int = 10) -> str:
     """Search Mediascribe source docs. Use this before answering architecture questions."""
@@ -238,8 +393,7 @@ def search_mediascribe(query: str, limit: int = 10) -> str:
         if not isinstance(item, dict):
             continue
         blog_id = str(item.get("blog_id") or "")
-        blog_url = f"{
-            MEDIASCRIBE_BASE_URL}/blog/{blog_id}" if blog_id else None
+        blog_url = f"{MEDIASCRIBE_BASE_URL}/blog/{blog_id}" if blog_id else None
         results.append(
             {
                 "blog_id": blog_id,
@@ -269,15 +423,18 @@ def search_mediascribe(query: str, limit: int = 10) -> str:
 
 def perform_mediascribe_research(
     primary_query: str,
-    related_queries: list[str] | None = None,
-    max_articles: int = 8,
+    related_queries: list[str] | str | None = None,
+    max_articles: int = RESEARCH_DEFAULT_ARTICLES,
+    min_good_articles: int = RESEARCH_MIN_GOOD_ARTICLES,
+    must_cover: list[str] | str | None = None,
     language: str = "en",
 ) -> dict[str, Any]:
     status("Planning searches...")
+    related_query_items = normalize_text_list(related_queries)
+    must_cover_items = normalize_text_list(must_cover)
     queries = [primary_query]
-    if related_queries:
-        queries.extend(str(query)
-                       for query in related_queries if str(query).strip())
+    queries.extend(related_query_items)
+    queries.extend(must_cover_items)
 
     normalized_queries = []
     seen_queries = set()
@@ -297,9 +454,11 @@ def perform_mediascribe_research(
     search_runs = []
     unique_results = {}
     results_by_query = []
-    for query in normalized_queries[:8]:
+    query_limit = clamp_int(RESEARCH_QUERY_LIMIT, 1, 24)
+    search_limit = clamp_int(RESEARCH_SEARCH_LIMIT, 1, 20)
+    for query in normalized_queries[:query_limit]:
         status(f"Knowledge lookup: {query}")
-        payload = request_json("/api/search", {"q": query, "limit": 20})
+        payload = request_json("/api/search", {"q": query, "limit": search_limit})
         results = (
             payload.get("results") if isinstance(
                 payload.get("results"), list) else []
@@ -316,7 +475,7 @@ def perform_mediascribe_research(
                         "mediascribe_section": item.get("section_name"),
                         "score": item.get("score"),
                     }
-                    for item in results[:5]
+                    for item in results[:8]
                     if isinstance(item, dict)
                 ],
             }
@@ -351,7 +510,12 @@ def perform_mediascribe_research(
         reverse=True,
     )
 
-    safe_max_articles = clamp_int(max_articles, 1, 10)
+    safe_max_articles = clamp_int(max_articles, 1, RESEARCH_MAX_ARTICLES)
+    safe_min_good_articles = min(
+        clamp_int(min_good_articles, 1, RESEARCH_MAX_ARTICLES),
+        safe_max_articles,
+    )
+    safe_max_fetch_attempts = max(safe_max_articles, RESEARCH_MAX_FETCH_ATTEMPTS)
     selected_results = []
     selected_blog_ids = set()
 
@@ -376,17 +540,33 @@ def perform_mediascribe_research(
         selected_results.append(result)
         selected_blog_ids.add(blog_id)
 
+    candidate_results = selected_results + [
+        result
+        for result in ranked_results
+        if str(result["search_result"].get("blog_id") or "") not in selected_blog_ids
+    ]
+
     articles = []
+    rejected_articles = []
     article_errors = []
-    for result in selected_results:
+    attempted_blog_ids = set()
+    for result in candidate_results:
+        if len(articles) >= safe_max_articles:
+            break
+        if len(attempted_blog_ids) >= safe_max_fetch_attempts:
+            break
         blog_id = result["search_result"].get("blog_id")
         if not blog_id:
             continue
+        blog_id = str(blog_id)
+        if blog_id in attempted_blog_ids:
+            continue
+        attempted_blog_ids.add(blog_id)
         title = str(result["search_result"].get(
             "title") or "untitled article").strip()
         status(f"Sifting through article: {title}")
         try:
-            blog = fetch_blog_api(str(blog_id))
+            blog = fetch_blog_api(blog_id)
         except Exception as exc:
             status(f"Skipping article after retries: {title}")
             article_errors.append(
@@ -401,17 +581,85 @@ def perform_mediascribe_research(
         payload = article_payload(blog, language)
         payload["matched_query"] = result["matched_query"]
         payload["search_score"] = result["score"]
-        articles.append(payload)
-        time.sleep(0.25)
+        quality = score_article_quality(
+            payload,
+            matched_query=result["matched_query"],
+            all_queries=normalized_queries[:query_limit],
+            must_cover=must_cover_items,
+        )
+        payload["quality"] = quality
+        if quality["is_solid"]:
+            status(f"Solid article found: {title}")
+            articles.append(payload)
+        else:
+            status(f"Article looks weak; continuing search: {title}")
+            rejected_articles.append(
+                {
+                    "blog_id": blog_id,
+                    "title": title,
+                    "matched_query": result["matched_query"],
+                    "quality": quality,
+                }
+            )
+        time.sleep(RESEARCH_ARTICLE_DELAY_SECONDS)
+
+        solid_count = sum(
+            1 for article in articles if article.get("quality", {}).get("is_solid")
+        )
+        if solid_count >= safe_min_good_articles and len(articles) >= safe_min_good_articles:
+            break
+
+    if not articles and rejected_articles:
+        status("No solid articles found; keeping best weak articles as fallback.")
+        fallback_by_score = sorted(
+            rejected_articles,
+            key=lambda item: item["quality"]["quality_score"],
+            reverse=True,
+        )[: min(safe_min_good_articles, safe_max_articles)]
+        fallback_ids = {item["blog_id"] for item in fallback_by_score}
+        attempted_blog_ids.clear()
+        for result in candidate_results:
+            blog_id = str(result["search_result"].get("blog_id") or "")
+            if blog_id not in fallback_ids or blog_id in attempted_blog_ids:
+                continue
+            attempted_blog_ids.add(blog_id)
+            try:
+                blog = fetch_blog_api(blog_id)
+            except Exception:
+                continue
+            payload = article_payload(blog, language)
+            payload["matched_query"] = result["matched_query"]
+            payload["search_score"] = result["score"]
+            payload["quality"] = score_article_quality(
+                payload,
+                matched_query=result["matched_query"],
+                all_queries=normalized_queries[:query_limit],
+                must_cover=must_cover_items,
+            )
+            payload["fallback_weak_article"] = True
+            articles.append(payload)
 
     return {
-        "queries": normalized_queries[:8],
+        "queries": normalized_queries[:query_limit],
         "search_runs": search_runs,
         "articles": articles,
+        "rejected_articles": rejected_articles,
         "article_errors": article_errors,
+        "quality_requirements": {
+            "min_good_articles": safe_min_good_articles,
+            "min_quality_score": RESEARCH_MIN_QUALITY_SCORE,
+            "max_fetch_attempts": safe_max_fetch_attempts,
+            "fetch_attempts": len(attempted_blog_ids),
+            "must_cover": must_cover_items,
+            "solid_articles": sum(
+                1 for article in articles if article.get("quality", {}).get("is_solid")
+            ),
+        },
         "selection_strategy": (
-            "Selected at least one top unique article per model-created query first, "
-            "then filled remaining slots by highest search score."
+            "Fetched candidate articles iteratively. Each article was scored against "
+            "the matched query, all research queries, must-cover criteria, markdown "
+            "length, and search score. Weak articles are skipped once minimum "
+            "coverage is satisfied."
         ),
         "research_note": (
             "These articles were selected after multiple searches. Use only their "
@@ -423,8 +671,10 @@ def perform_mediascribe_research(
 @tool
 def research_mediascribe(
     primary_query: str,
-    related_queries: list[str] | None = None,
-    max_articles: int = 8,
+    related_queries: list[str] | str | None = None,
+    max_articles: int = RESEARCH_DEFAULT_ARTICLES,
+    min_good_articles: int = RESEARCH_MIN_GOOD_ARTICLES,
+    must_cover: list[str] | str | None = None,
     language: str = "en",
 ) -> str:
     """Research Mediascribe with multiple searches, then fetch full articles for the best unique results."""
@@ -433,6 +683,8 @@ def research_mediascribe(
             primary_query=primary_query,
             related_queries=related_queries,
             max_articles=max_articles,
+            min_good_articles=min_good_articles,
+            must_cover=must_cover,
             language=language,
         )
     )
@@ -454,8 +706,7 @@ def list_mediascribe_landing_page(limit: int = 10) -> str:
         if not isinstance(item, dict):
             continue
         blog_id = str(item.get("id") or "")
-        blog_url = f"{
-            MEDIASCRIBE_BASE_URL}/blog/{blog_id}" if blog_id else None
+        blog_url = f"{MEDIASCRIBE_BASE_URL}/blog/{blog_id}" if blog_id else None
         articles.append(
             {
                 "blog_id": blog_id,
@@ -745,11 +996,14 @@ Mediascribe base URL: {MEDIASCRIBE_BASE_URL}
 Tool policy:
 - Before any final answer to a technical question, call research_mediascribe.
 - You create the research queries yourself from the user's question.
-- research_mediascribe accepts one primary_query and related_queries; provide 5 to 8 varied searches for broad architecture questions.
-- Use max_articles=8 for normal technical questions and max_articles=10 for broad system design questions.
-- Your searches should cover the exact topic, adjacent architecture concepts, implementation details, and failure modes when relevant.
-- research_mediascribe searches Mediascribe and fetches full articles from /api/public/blogs/{{blog_id}}.
-- If the first research result is too generic, call research_mediascribe a second time with sharper queries before answering.
+- research_mediascribe accepts primary_query, related_queries, must_cover, min_good_articles, and max_articles.
+- For normal technical questions, provide 6 to 10 varied searches and use max_articles=12 to 18.
+- For broad or complex system design questions, provide 10 to 14 varied searches and use max_articles=18 to 24.
+- Provide must_cover criteria that define what a useful article set must contain, such as "conflict resolution", "durable operation log", "database scaling", "failure modes", "observability", or problem-specific subsystems.
+- Use min_good_articles=8 for normal questions and 12 to 16 for broad system design questions.
+- Your searches should cover the exact topic, adjacent architecture concepts, implementation details, data models, critical-path flows, scaling bottlenecks, consistency/durability, reliability patterns, failure modes, observability, and rollout concerns when relevant.
+- research_mediascribe searches Mediascribe, fetches full articles from /api/public/blogs/{{blog_id}}, scores article quality, keeps searching through candidates, and returns the strongest set it can find.
+- If the first research result is too generic, too sparse, misses a major subsystem, or would lead to an answer below 90% confidence, call research_mediascribe a second time with sharper queries before answering.
 - Do not answer from search previews alone.
 - Do not rely on the first search result alone.
 - Use list_mediascribe_landing_page when you need recent articles, sections, or landing-page context.
@@ -761,6 +1015,8 @@ Tool policy:
 Answer policy:
 - Ask for missing requirements when they affect architecture choices.
 - Give an architect's recommendation, not a generic article summary.
+- Aim for staff-level design quality. A final answer should be good enough that a senior engineer would score it 90%+ for correctness, specificity, tradeoff awareness, and operational realism.
+- Before finalizing, check whether the answer includes: requirements/assumptions, end-to-end flows, source-of-truth choices, read/write scaling, caching/invalidation, async processing, failure handling, consistency/durability, observability, rollout, and explicit tradeoffs. If important parts are weak, research more before answering.
 - Use the architecture pattern catalog below as a checklist for practical design recommendations.
 - For system design questions, include a concrete request/data flow such as Browser -> CDN -> WAF -> Gateway -> Load Balancer -> App -> Cache -> Database, adapted to the problem.
 - Include relevant cross-cutting patterns: load balancing, gateways, rate limiting, retries, timeouts, circuit breakers, caching, queues, database pooling, scaling, observability, and failure modes.
@@ -875,13 +1131,92 @@ def tool_call_names(result: dict[str, Any]) -> list[str]:
     return names
 
 
+def research_payloads(result: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = result.get("messages", []) if isinstance(result, dict) else []
+    tool_call_names_by_id = {}
+    payloads = []
+
+    for message in messages:
+        for call in message_tool_calls(message):
+            call_id = call.get("id")
+            call_name = call.get("name")
+            if call_id and call_name:
+                tool_call_names_by_id[str(call_id)] = str(call_name)
+
+    for message in messages:
+        message_type = getattr(message, "type", message.__class__.__name__)
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if message_type != "tool" and not tool_call_id:
+            continue
+
+        name = getattr(message, "name", None)
+        if not name and tool_call_id:
+            name = tool_call_names_by_id.get(str(tool_call_id))
+        if name != "research_mediascribe":
+            continue
+
+        try:
+            payload = json.loads(str(getattr(message, "content", "") or "{}"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+
+    return payloads
+
+
+def research_quality(result: dict[str, Any]) -> dict[str, Any]:
+    payloads = research_payloads(result)
+    solid_blog_ids = set()
+    article_blog_ids = set()
+    rejected_count = 0
+    max_min_good = 0
+    max_fetch_attempts = 0
+
+    for payload in payloads:
+        requirements = payload.get("quality_requirements")
+        if isinstance(requirements, dict):
+            max_min_good = max(
+                max_min_good, int(requirements.get("min_good_articles") or 0)
+            )
+            max_fetch_attempts = max(
+                max_fetch_attempts, int(requirements.get("fetch_attempts") or 0)
+            )
+
+        for article in payload.get("articles", []):
+            if not isinstance(article, dict):
+                continue
+            blog_id = article.get("blog_id")
+            if blog_id:
+                article_blog_ids.add(str(blog_id))
+                if article.get("quality", {}).get("is_solid"):
+                    solid_blog_ids.add(str(blog_id))
+
+        rejected = payload.get("rejected_articles")
+        if isinstance(rejected, list):
+            rejected_count += len(rejected)
+
+    target = max_min_good or RESEARCH_MIN_GOOD_ARTICLES
+    return {
+        "research_calls": len(payloads),
+        "solid_articles": len(solid_blog_ids),
+        "articles": len(article_blog_ids),
+        "rejected_articles": rejected_count,
+        "target_solid_articles": target,
+        "max_fetch_attempts_seen": max_fetch_attempts,
+        "accepted": len(solid_blog_ids) >= target,
+    }
+
+
 def invoke_agent_with_required_research(
     agent: Any, prompt: str
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     attempts = []
     user_message = prompt
 
-    for attempt in range(1, 4):
+    max_attempts = max(1, RESEARCH_ENFORCEMENT_ATTEMPTS)
+    last_result = None
+    for attempt in range(1, max_attempts + 1):
         result = agent.invoke(
             {
                 "messages": [
@@ -890,29 +1225,47 @@ def invoke_agent_with_required_research(
                 ],
             }
         )
+        last_result = result
         names = tool_call_names(result)
+        quality = research_quality(result)
         attempts.append(
             {
                 "attempt": attempt,
                 "tool_call_names": names,
-                "accepted": "research_mediascribe" in names,
+                "research_quality": quality,
+                "accepted": "research_mediascribe" in names and quality["accepted"],
             }
         )
 
-        if "research_mediascribe" in names:
+        if "research_mediascribe" in names and quality["accepted"]:
+            return result, attempts
+
+        if "research_mediascribe" in names and attempt >= max_attempts:
+            status("Research coverage is still thin; returning best available answer.")
             return result, attempts
 
         status("Research required: retrying with Mediascribe lookup...")
+        if "research_mediascribe" in names:
+            status(
+                "Research coverage too thin: "
+                f"solid_articles={quality['solid_articles']} "
+                f"target={quality['target_solid_articles']}; retrying..."
+            )
         user_message = (
-            "You tried to answer without calling research_mediascribe. "
             "Do not answer yet. First call research_mediascribe with your own "
-            "primary_query and related_queries for this user question. "
-            "After the tool returns full articles, compile the final answer.\n\n"
+            "primary_query, related_queries, and must_cover criteria for this "
+            "user question. If prior research was thin, use different, sharper, "
+            "more subsystem-specific searches. Pull enough full articles to meet "
+            "the target solid article count before compiling the final answer.\n\n"
+            f"Prior research quality: {compact_json(quality)}\n\n"
             f"User question: {prompt}"
         )
 
+    if last_result is not None:
+        return last_result, attempts
+
     raise RuntimeError(
-        "Agent did not call research_mediascribe after 3 attempts.")
+        f"Agent did not call research_mediascribe after {max_attempts} attempts.")
 
 
 def build_diagnostics(
