@@ -17,7 +17,7 @@ uv run python main.py "Design a global Instagram-style media platform for 500M m
   - System must survive regional failure
 
   Give me the architecture, request/data flows, storage choices, caching strategy, feed generation strategy, queue/event design, rate limiting, retries, circuit breakers, database scaling,
-  PgBouncer/connection pooling, observability, failure modes, and rollout plan."
+  PgBouncer/connection pooling, observability, failure modes, and rollout plan." > example-outputs/instagram-style.md
 
 uv run python main.py "Design a global real-time collaborative document editor like Google Docs.
 
@@ -35,5 +35,5 @@ uv run python main.py "Design a global real-time collaborative document editor l
   - Documents must never lose committed edits
 
   Give me the architecture, request/data flows, conflict resolution strategy, storage choices, caching strategy, real-time sync design, message queue/event design, rate limiting, retries,
-  circuit breakers, database scaling, PgBouncer/connection pooling, observability, failure modes, disaster recovery, and rollout plan."
+  circuit breakers, database scaling, PgBouncer/connection pooling, observability, failure modes, disaster recovery, and rollout plan." > example-outputs/google-docs-style.md
 ```
