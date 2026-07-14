@@ -13,6 +13,14 @@ uv run python main.py "Design a Redis-backed rate limiter"
 ```
 
 ```bash
+uv run python main.py --complexity simple --output-mode brief "what is redis?"
+```
+
+```bash
+uv run python main.py --complexity max --output-mode production-plan --research-budget-seconds 300 "design instagram"
+```
+
+```bash
 echo "Design a cache strategy for a social feed" | uv run python main.py
 ```
 
@@ -28,15 +36,40 @@ echo "Design a cache strategy for a social feed" | uv run python main.py
 - `OPENAI_TEMPERATURE`: defaults to `0.2`
 - `AGENT_DIAGNOSTICS_DIR`: defaults to `diagnostics`
 - `AGENT_PROGRESS_STREAM`: defaults to `stdout`; set to `stderr` if you want progress separate from the final answer.
-- `AGENT_RESEARCH_QUERY_LIMIT`: defaults to `20`
-- `AGENT_RESEARCH_SEARCH_LIMIT`: defaults to `20`
-- `AGENT_RESEARCH_DEFAULT_ARTICLES`: defaults to `24`
-- `AGENT_RESEARCH_MAX_ARTICLES`: defaults to `32`
-- `AGENT_RESEARCH_MIN_GOOD_ARTICLES`: defaults to `12`
+- `AGENT_COMPLEXITY`: defaults to `auto`; valid values are `auto`, `simple`, `standard`, `deep`, `max`.
+- `AGENT_OUTPUT_MODE`: defaults to `normal`; valid values are `brief`, `normal`, `detailed`, `interview`, `production-plan`.
+- `AGENT_RESEARCH_BUDGET_SECONDS`: overrides the selected complexity profile.
+- `AGENT_RESEARCH_QUERY_LIMIT`: overrides the selected complexity profile.
+- `AGENT_RESEARCH_SEARCH_LIMIT`: overrides the selected complexity profile.
+- `AGENT_RESEARCH_DEFAULT_ARTICLES`: overrides the selected complexity profile.
+- `AGENT_RESEARCH_MAX_ARTICLES`: overrides the selected complexity profile.
+- `AGENT_RESEARCH_MIN_GOOD_ARTICLES`: overrides the selected complexity profile.
 - `AGENT_RESEARCH_MIN_QUALITY_SCORE`: defaults to `0.35`
-- `AGENT_RESEARCH_MAX_FETCH_ATTEMPTS`: defaults to `80`
+- `AGENT_RESEARCH_MAX_FETCH_ATTEMPTS`: overrides the selected complexity profile.
 - `AGENT_RESEARCH_ARTICLE_DELAY_SECONDS`: defaults to `0.25`
-- `AGENT_RESEARCH_ENFORCEMENT_ATTEMPTS`: defaults to `4`
+- `AGENT_RESEARCH_ENFORCEMENT_ATTEMPTS`: overrides the selected complexity profile.
+
+## Complexity Profiles
+
+- `simple`: for direct concept questions like `what is redis?`; small lookup, 1 strong article target, 30 second research budget.
+- `standard`: for bounded design decisions; moderate lookup, 4 strong article target, 90 second research budget.
+- `deep`: for normal system design prompts; broad lookup, 8 strong article target, 180 second research budget.
+- `max`: for large-scale product architecture like `design instagram`; full lookup, 16 strong article target, 300 second research budget.
+- `auto`: classifies the prompt locally before the model runs.
+
+## Output Modes
+
+- `brief`: compact direct answer.
+- `normal`: balanced architecture answer.
+- `detailed`: deeper tradeoffs and operations.
+- `interview`: system-design interview format.
+- `production-plan`: implementation and operations rollout format.
+
+## CLI Overrides
+
+- `--complexity`: overrides `AGENT_COMPLEXITY`.
+- `--output-mode`: overrides `AGENT_OUTPUT_MODE`.
+- `--research-budget-seconds`: overrides profile and env budget.
 
 ## Tools
 
@@ -48,6 +81,10 @@ echo "Design a cache strategy for a social feed" | uv run python main.py
 ## Research Behavior
 
 - The model sees the user question first.
+- The CLI chooses a complexity profile before building the agent.
+- Progress output includes `Complexity: <profile>`.
+- Progress output includes `Output mode: <mode>`.
+- Progress output includes `Research budget: <seconds>s`.
 - The model must call `research_mediascribe` before answering technical questions.
 - The model creates the primary and related search queries for `research_mediascribe`.
 - Search queries should be compact keyword phrases, not full sentences.
@@ -59,11 +96,14 @@ echo "Design a cache strategy for a social feed" | uv run python main.py
 - The CLI also rejects thin research when the tool returns fewer solid articles than requested, then forces another pass with sharper model-created queries.
 - Research runs the model-created searches instead of trusting the first query.
 - Research fetches article content, scores quality, accepts solid articles, and continues through candidates when an article is weak.
+- Research stops when the selected budget is exhausted and reports `budget_exhausted`.
 - Research penalizes generic background articles unless they have strong topic-specific evidence.
 - Research returns `recommended_sources` as the preferred citation shortlist.
 - Progress output includes each lookup query and each selected article title.
 - The research pass fetches full article markdown for the best unique results.
 - The diagnostics file stores retry attempts under `research_enforcement`.
+- The diagnostics file stores the selected complexity profile under `configuration.complexity_profile`.
+- The diagnostics file stores output mode and research budget inside the complexity profile.
 - This is tuned for large-context runs. Expect much higher token usage than earlier versions.
 
 ## Response Style

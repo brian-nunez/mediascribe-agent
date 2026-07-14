@@ -1,3 +1,4 @@
+import argparse
 import html
 import json
 import os
@@ -41,6 +42,123 @@ RESEARCH_ARTICLE_DELAY_SECONDS = float(
 RESEARCH_ENFORCEMENT_ATTEMPTS = int(
     os.getenv("AGENT_RESEARCH_ENFORCEMENT_ATTEMPTS", "4")
 )
+AGENT_COMPLEXITY = os.getenv("AGENT_COMPLEXITY", "auto").strip().lower()
+AGENT_OUTPUT_MODE = os.getenv("AGENT_OUTPUT_MODE", "normal").strip().lower()
+
+RESEARCH_PROFILES = {
+    "simple": {
+        "query_limit": 4,
+        "search_limit": 10,
+        "default_articles": 4,
+        "max_articles": 6,
+        "min_good_articles": 1,
+        "max_fetch_attempts": 10,
+        "enforcement_attempts": 1,
+        "research_budget_seconds": 30,
+        "query_guidance": "Use 2 to 4 keyword searches and fetch 1 to 4 strong articles.",
+    },
+    "standard": {
+        "query_limit": 8,
+        "search_limit": 15,
+        "default_articles": 8,
+        "max_articles": 12,
+        "min_good_articles": 4,
+        "max_fetch_attempts": 24,
+        "enforcement_attempts": 2,
+        "research_budget_seconds": 90,
+        "query_guidance": "Use 4 to 8 keyword searches and fetch 4 to 8 strong articles.",
+    },
+    "deep": {
+        "query_limit": 14,
+        "search_limit": 20,
+        "default_articles": 18,
+        "max_articles": 24,
+        "min_good_articles": 8,
+        "max_fetch_attempts": 50,
+        "enforcement_attempts": 3,
+        "research_budget_seconds": 180,
+        "query_guidance": "Use 10 to 14 keyword searches and fetch 8 to 12 strong articles.",
+    },
+    "max": {
+        "query_limit": 20,
+        "search_limit": 20,
+        "default_articles": 24,
+        "max_articles": 32,
+        "min_good_articles": 16,
+        "max_fetch_attempts": 80,
+        "enforcement_attempts": 4,
+        "research_budget_seconds": 300,
+        "query_guidance": "Use 14 to 20 keyword searches and fetch 12 to 16 strong articles.",
+    },
+}
+
+OUTPUT_MODES = {
+    "brief": {
+        "guidance": "Answer in a compact form. Prioritize the direct answer and key tradeoffs.",
+        "requirements": [
+            "direct answer",
+            "where it fits",
+            "main tradeoffs",
+            "sources",
+        ],
+    },
+    "normal": {
+        "guidance": "Use balanced depth. Include enough architecture detail without exhaustive planning.",
+        "requirements": [
+            "recommendation",
+            "requirements or assumptions",
+            "main flow",
+            "key tradeoffs",
+            "failure modes",
+            "sources",
+        ],
+    },
+    "detailed": {
+        "guidance": "Go deeper on architecture, operations, tradeoffs, and implementation detail.",
+        "requirements": [
+            "requirements and assumptions",
+            "end-to-end flow",
+            "source-of-truth choices",
+            "read and write paths",
+            "scaling",
+            "caching and invalidation",
+            "async processing",
+            "failure handling",
+            "observability",
+            "tradeoffs",
+            "sources",
+        ],
+    },
+    "interview": {
+        "guidance": "Use a system-design interview format with scoped assumptions and crisp decisions.",
+        "requirements": [
+            "requirements",
+            "capacity assumptions when useful",
+            "API or interface sketch when useful",
+            "data model",
+            "high-level design",
+            "deep dives",
+            "bottlenecks",
+            "tradeoffs",
+            "sources",
+        ],
+    },
+    "production-plan": {
+        "guidance": "Frame the answer as a production implementation and operations plan.",
+        "requirements": [
+            "target architecture",
+            "implementation phases",
+            "data migration or rollout",
+            "operational controls",
+            "observability",
+            "failure handling",
+            "security controls",
+            "risks",
+            "sources",
+        ],
+    },
+}
+CURRENT_RESEARCH_PROFILE: dict[str, Any] | None = None
 
 SESSION = requests.Session()
 SESSION.headers.update(
@@ -104,6 +222,142 @@ def compact_json(payload: Any) -> str:
 
 def clamp_int(value: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, int(value)))
+
+
+def env_int(name: str, fallback: int) -> int:
+    if name not in os.environ:
+        return fallback
+    return int(os.environ[name])
+
+
+def normalize_complexity(value: str) -> str:
+    normalized = str(value or "auto").strip().lower()
+    if normalized in {"simple", "standard", "deep", "max", "auto"}:
+        return normalized
+    return "auto"
+
+
+def normalize_output_mode(value: str) -> str:
+    normalized = str(value or "normal").strip().lower()
+    if normalized in OUTPUT_MODES:
+        return normalized
+    return "normal"
+
+
+def classify_complexity(prompt: str) -> str:
+    text = str(prompt or "").lower()
+    words = re.findall(r"[a-zA-Z0-9]+", text)
+    word_count = len(words)
+
+    max_markers = {
+        "500m",
+        "million",
+        "global",
+        "multi-region",
+        "instagram",
+        "youtube",
+        "twitter",
+        "tiktok",
+        "facebook",
+        "netflix",
+        "google docs",
+        "large scale",
+        "planet scale",
+    }
+    deep_markers = {
+        "architecture",
+        "design",
+        "system design",
+        "scalable",
+        "scale",
+        "sharding",
+        "distributed",
+        "high availability",
+        "real-time",
+        "websocket",
+        "feed",
+        "multi tenant",
+        "failure modes",
+    }
+    simple_prefixes = (
+        "what is ",
+        "what are ",
+        "explain ",
+        "define ",
+        "difference between ",
+        "compare ",
+        "why is ",
+    )
+    standard_prefixes = (
+        "should i use ",
+        "when should i use ",
+        "would you use ",
+        "which should i use ",
+    )
+
+    if any(marker in text for marker in max_markers):
+        return "max"
+    if any(marker in text for marker in deep_markers):
+        return "deep"
+    if text.startswith(standard_prefixes):
+        return "standard"
+    if word_count <= 10 or text.startswith(simple_prefixes):
+        return "simple"
+    return "standard"
+
+
+def select_research_profile(
+    prompt: str,
+    requested_complexity: str | None = None,
+    output_mode: str | None = None,
+    research_budget_seconds: int | None = None,
+) -> dict[str, Any]:
+    requested = normalize_complexity(requested_complexity or AGENT_COMPLEXITY)
+    selected_output_mode = normalize_output_mode(output_mode or AGENT_OUTPUT_MODE)
+    selected = classify_complexity(prompt) if requested == "auto" else requested
+    base = dict(RESEARCH_PROFILES[selected])
+    mode_config = OUTPUT_MODES[selected_output_mode]
+    base.update(
+        {
+            "name": selected,
+            "requested": requested,
+            "auto_classified": requested == "auto",
+            "output_mode": selected_output_mode,
+            "output_guidance": mode_config["guidance"],
+            "answer_requirements": mode_config["requirements"],
+            "query_limit": env_int("AGENT_RESEARCH_QUERY_LIMIT", base["query_limit"]),
+            "search_limit": env_int("AGENT_RESEARCH_SEARCH_LIMIT", base["search_limit"]),
+            "default_articles": env_int(
+                "AGENT_RESEARCH_DEFAULT_ARTICLES", base["default_articles"]
+            ),
+            "max_articles": env_int("AGENT_RESEARCH_MAX_ARTICLES", base["max_articles"]),
+            "min_good_articles": env_int(
+                "AGENT_RESEARCH_MIN_GOOD_ARTICLES", base["min_good_articles"]
+            ),
+            "max_fetch_attempts": env_int(
+                "AGENT_RESEARCH_MAX_FETCH_ATTEMPTS", base["max_fetch_attempts"]
+            ),
+            "enforcement_attempts": env_int(
+                "AGENT_RESEARCH_ENFORCEMENT_ATTEMPTS",
+                base["enforcement_attempts"],
+            ),
+            "research_budget_seconds": (
+                research_budget_seconds
+                if research_budget_seconds is not None
+                else env_int(
+                    "AGENT_RESEARCH_BUDGET_SECONDS",
+                    base["research_budget_seconds"],
+                )
+            ),
+        }
+    )
+    return base
+
+
+def active_research_profile() -> dict[str, Any]:
+    if CURRENT_RESEARCH_PROFILE is not None:
+        return CURRENT_RESEARCH_PROFILE
+    return select_research_profile("")
 
 
 def normalize_text_list(value: Any) -> list[str]:
@@ -630,12 +884,27 @@ def search_mediascribe(query: str, limit: int = 10) -> str:
 def perform_mediascribe_research(
     primary_query: str,
     related_queries: list[str] | str | None = None,
-    max_articles: int = RESEARCH_DEFAULT_ARTICLES,
-    min_good_articles: int = RESEARCH_MIN_GOOD_ARTICLES,
+    max_articles: int | None = None,
+    min_good_articles: int | None = None,
     must_cover: list[str] | str | None = None,
     language: str = "en",
 ) -> dict[str, Any]:
     status("Planning searches...")
+    profile = active_research_profile()
+    research_started = time.perf_counter()
+    research_budget_seconds = max(1, int(profile["research_budget_seconds"]))
+    budget_exhausted = False
+
+    def budget_state() -> dict[str, Any]:
+        elapsed = time.perf_counter() - research_started
+        remaining = max(0.0, research_budget_seconds - elapsed)
+        return {
+            "budget_seconds": research_budget_seconds,
+            "elapsed_seconds": round(elapsed, 3),
+            "remaining_budget_seconds": round(remaining, 3),
+            "budget_exhausted": elapsed >= research_budget_seconds,
+        }
+
     related_query_items = normalize_text_list(related_queries)
     must_cover_items = normalize_text_list(must_cover)
     queries = [primary_query]
@@ -663,13 +932,17 @@ def perform_mediascribe_research(
     search_runs = []
     unique_results = {}
     results_by_query = []
-    query_limit = clamp_int(RESEARCH_QUERY_LIMIT, 1, 24)
-    search_limit = clamp_int(RESEARCH_SEARCH_LIMIT, 1, 20)
+    query_limit = clamp_int(int(profile["query_limit"]), 1, 24)
+    search_limit = clamp_int(int(profile["search_limit"]), 1, 20)
     active_query_pairs = query_pairs[:query_limit]
     original_queries = [item["query"] for item in active_query_pairs]
     search_queries = [item["search_query"] for item in active_query_pairs]
     scoring_queries = original_queries + search_queries
     for query_pair in active_query_pairs:
+        if budget_state()["budget_exhausted"]:
+            budget_exhausted = True
+            status("Research budget exhausted during search planning.")
+            break
         query = query_pair["query"]
         search_query = query_pair["search_query"]
         status(f"Knowledge lookup: {search_query}")
@@ -729,12 +1002,13 @@ def perform_mediascribe_research(
         reverse=True,
     )
 
-    safe_max_articles = clamp_int(max_articles, 1, RESEARCH_MAX_ARTICLES)
-    safe_min_good_articles = min(
-        clamp_int(min_good_articles, 1, RESEARCH_MAX_ARTICLES),
-        safe_max_articles,
+    profile_max_articles = int(profile["max_articles"])
+    requested_max_articles = (
+        int(max_articles) if max_articles is not None else int(profile["default_articles"])
     )
-    safe_max_fetch_attempts = max(safe_max_articles, RESEARCH_MAX_FETCH_ATTEMPTS)
+    safe_max_articles = clamp_int(requested_max_articles, 1, profile_max_articles)
+    safe_min_good_articles = min(int(profile["min_good_articles"]), safe_max_articles)
+    safe_max_fetch_attempts = max(safe_max_articles, int(profile["max_fetch_attempts"]))
     selected_results = []
     selected_blog_ids = set()
 
@@ -770,6 +1044,10 @@ def perform_mediascribe_research(
     article_errors = []
     attempted_blog_ids = set()
     for result in candidate_results:
+        if budget_state()["budget_exhausted"]:
+            budget_exhausted = True
+            status("Research budget exhausted during article review.")
+            break
         if len(articles) >= safe_max_articles:
             break
         if len(attempted_blog_ids) >= safe_max_fetch_attempts:
@@ -843,6 +1121,10 @@ def perform_mediascribe_research(
         fallback_ids = {item["blog_id"] for item in fallback_by_score}
         attempted_blog_ids.clear()
         for result in candidate_results:
+            if budget_state()["budget_exhausted"]:
+                budget_exhausted = True
+                status("Research budget exhausted during fallback article review.")
+                break
             blog_id = str(result["search_result"].get("blog_id") or "")
             if blog_id not in fallback_ids or blog_id in attempted_blog_ids:
                 continue
@@ -864,6 +1146,9 @@ def perform_mediascribe_research(
             payload["fallback_weak_article"] = True
             articles.append(payload)
 
+    final_budget_state = budget_state()
+    budget_exhausted = budget_exhausted or bool(final_budget_state["budget_exhausted"])
+
     solid_articles = [
         article for article in articles if article.get("quality", {}).get("is_solid")
     ]
@@ -876,6 +1161,10 @@ def perform_mediascribe_research(
         "queries": original_queries,
         "search_queries": search_queries,
         "search_runs": search_runs,
+        "complexity_profile": profile,
+        "output_mode": profile["output_mode"],
+        "answer_requirements": profile["answer_requirements"],
+        "research_budget": {**final_budget_state, "budget_exhausted": budget_exhausted},
         "articles": articles,
         "recommended_sources": source_shortlist,
         "source_policy": (
@@ -896,6 +1185,7 @@ def perform_mediascribe_research(
                 1 for article in articles if article.get("quality", {}).get("is_solid")
             ),
             "recommended_source_count": len(source_shortlist),
+            "budget_exhausted": budget_exhausted,
         },
         "selection_strategy": (
             "Fetched candidate articles iteratively. Each article was scored against "
@@ -914,8 +1204,8 @@ def perform_mediascribe_research(
 def research_mediascribe(
     primary_query: str,
     related_queries: list[str] | str | None = None,
-    max_articles: int = RESEARCH_DEFAULT_ARTICLES,
-    min_good_articles: int = RESEARCH_MIN_GOOD_ARTICLES,
+    max_articles: int | None = None,
+    min_good_articles: int | None = None,
     must_cover: list[str] | str | None = None,
     language: str = "en",
 ) -> str:
@@ -1286,6 +1576,27 @@ Architecture pattern catalog:
 """.strip()
 
 
+def system_prompt_for_profile(profile: dict[str, Any]) -> str:
+    return (
+        f"{SYSTEM_PROMPT}\n\n"
+        "Active complexity profile:\n"
+        f"- complexity: {profile['name']}\n"
+        f"- requested_complexity: {profile['requested']}\n"
+        f"- query_limit: {profile['query_limit']}\n"
+        f"- search_limit: {profile['search_limit']}\n"
+        f"- max_articles: {profile['max_articles']}\n"
+        f"- min_good_articles: {profile['min_good_articles']}\n"
+        f"- max_fetch_attempts: {profile['max_fetch_attempts']}\n"
+        f"- research_budget_seconds: {profile['research_budget_seconds']}\n"
+        f"- output_mode: {profile['output_mode']}\n"
+        f"- guidance: {profile['query_guidance']}\n"
+        f"- output_guidance: {profile['output_guidance']}\n"
+        f"- answer_requirements: {', '.join(profile['answer_requirements'])}\n"
+        "- Match answer depth to this profile. For simple questions, answer directly "
+        "after a small lookup. For max questions, produce a full architecture brief."
+    )
+
+
 def build_agent():
     return create_agent(
         model=build_llm(),
@@ -1419,10 +1730,20 @@ def research_quality(result: dict[str, Any]) -> dict[str, Any]:
     rejected_count = 0
     max_min_good = 0
     max_fetch_attempts = 0
+    budget_exhausted = False
 
     for payload in payloads:
+        research_budget = payload.get("research_budget")
+        if isinstance(research_budget, dict):
+            budget_exhausted = budget_exhausted or bool(
+                research_budget.get("budget_exhausted")
+            )
+
         requirements = payload.get("quality_requirements")
         if isinstance(requirements, dict):
+            budget_exhausted = budget_exhausted or bool(
+                requirements.get("budget_exhausted")
+            )
             max_min_good = max(
                 max_min_good, int(requirements.get("min_good_articles") or 0)
             )
@@ -1443,7 +1764,7 @@ def research_quality(result: dict[str, Any]) -> dict[str, Any]:
         if isinstance(rejected, list):
             rejected_count += len(rejected)
 
-    target = max_min_good or RESEARCH_MIN_GOOD_ARTICLES
+    target = max_min_good or int(active_research_profile()["min_good_articles"])
     return {
         "research_calls": len(payloads),
         "solid_articles": len(solid_blog_ids),
@@ -1451,23 +1772,25 @@ def research_quality(result: dict[str, Any]) -> dict[str, Any]:
         "rejected_articles": rejected_count,
         "target_solid_articles": target,
         "max_fetch_attempts_seen": max_fetch_attempts,
-        "accepted": len(solid_blog_ids) >= target,
+        "budget_exhausted": budget_exhausted,
+        "accepted": len(solid_blog_ids) >= target or budget_exhausted,
     }
 
 
 def invoke_agent_with_required_research(
-    agent: Any, prompt: str
+    agent: Any, prompt: str, profile: dict[str, Any]
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     attempts = []
     user_message = prompt
 
-    max_attempts = max(1, RESEARCH_ENFORCEMENT_ATTEMPTS)
+    max_attempts = max(1, int(profile["enforcement_attempts"]))
+    system_prompt = system_prompt_for_profile(profile)
     last_result = None
     for attempt in range(1, max_attempts + 1):
         result = agent.invoke(
             {
                 "messages": [
-                    SystemMessage(SYSTEM_PROMPT),
+                    SystemMessage(system_prompt),
                     HumanMessage(user_message),
                 ],
             }
@@ -1521,6 +1844,7 @@ def build_diagnostics(
     result: dict[str, Any],
     started_at: datetime,
     elapsed_seconds: float,
+    complexity_profile: dict[str, Any],
     research_enforcement: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     messages = result.get("messages", []) if isinstance(result, dict) else []
@@ -1582,6 +1906,7 @@ def build_diagnostics(
             "openai_base_url": os.getenv("OPENAI_BASE_URL", DEFAULT_MODEL_BASE_URL),
             "openai_model": os.getenv("OPENAI_MODEL", DEFAULT_MODEL_NAME),
             "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.2")),
+            "complexity_profile": complexity_profile,
         },
         "usage_totals": totals,
         "usage_records": usage_records,
@@ -1602,9 +1927,35 @@ def write_diagnostics(diagnostics: dict[str, Any]) -> Path:
     return path
 
 
-def read_prompt() -> str:
-    if len(sys.argv) > 1:
-        return " ".join(sys.argv[1:]).strip()
+def parse_cli_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the Mediascribe-backed architecture agent."
+    )
+    parser.add_argument(
+        "--complexity",
+        choices=["auto", "simple", "standard", "deep", "max"],
+        default=None,
+        help="Override automatic research complexity.",
+    )
+    parser.add_argument(
+        "--output-mode",
+        choices=list(OUTPUT_MODES.keys()),
+        default=None,
+        help="Control final answer shape.",
+    )
+    parser.add_argument(
+        "--research-budget-seconds",
+        type=int,
+        default=None,
+        help="Override the selected profile's research time budget.",
+    )
+    parser.add_argument("prompt", nargs="*", help="Architecture question.")
+    return parser.parse_args(argv)
+
+
+def read_prompt(args: argparse.Namespace) -> str:
+    if args.prompt:
+        return " ".join(args.prompt).strip()
 
     if not sys.stdin.isatty():
         return sys.stdin.read().strip()
@@ -1613,22 +1964,38 @@ def read_prompt() -> str:
 
 
 def main() -> int:
-    prompt = read_prompt()
+    global CURRENT_RESEARCH_PROFILE
+
+    args = parse_cli_args(sys.argv[1:])
+    prompt = read_prompt(args)
     if not prompt:
         print("Provide an architecture question.")
         return 2
 
+    complexity_profile = select_research_profile(
+        prompt,
+        requested_complexity=args.complexity,
+        output_mode=args.output_mode,
+        research_budget_seconds=args.research_budget_seconds,
+    )
+    CURRENT_RESEARCH_PROFILE = complexity_profile
     started_at = datetime.now(timezone.utc)
     started = time.perf_counter()
     status("Sifting through files...")
+    status(f"Complexity: {complexity_profile['name']}")
+    status(f"Output mode: {complexity_profile['output_mode']}")
+    status(f"Research budget: {complexity_profile['research_budget_seconds']}s")
     agent = build_agent()
-    result, research_enforcement = invoke_agent_with_required_research(agent, prompt)
+    result, research_enforcement = invoke_agent_with_required_research(
+        agent, prompt, complexity_profile
+    )
     elapsed_seconds = time.perf_counter() - started
     diagnostics = build_diagnostics(
         prompt,
         result,
         started_at,
         elapsed_seconds,
+        complexity_profile=complexity_profile,
         research_enforcement=research_enforcement,
     )
     diagnostics_path = write_diagnostics(diagnostics)
