@@ -1,126 +1,137 @@
 # mediascribe-agent
 
-- Technical design architect agent backed by Mediascribe.
-- Landing page context comes from `https://mediascribe.b8z.me/`.
-- Search uses `https://mediascribe.b8z.me/api/search`.
-- Full article detail uses `https://mediascribe.b8z.me/api/public/blogs/{blog_id}`.
-- Public citations still use `https://mediascribe.b8z.me/blog/{blog_id}`.
+A technical design architect agent backed by the Mediascribe API, rebuilt to
+run well on a **small local model with a limited context window** (e.g. Gemma
+3n E2B on llama.cpp with 128k context).
+
+## Why this was rewritten
+
+The previous version wrapped a 2B model in a heavy agent framework and asked it
+to drive research through a single mega-tool. That failed three ways:
+
+- **Endless loops.** An enforcement loop demanded up to 16 "solid" articles and
+  retried up to 4× when the target could not be met — which, for many topics,
+  it never could. A broad prompt took ~9 minutes.
+- **Context overflow.** One research call returned ~52 KB (~15k tokens) of
+  nested scoring JSON; multiple calls per run pushed input past 80k tokens. A 2B
+  model cannot reason over that regardless of the window size.
+- **Weak answers.** Buried in noise, with an impossible quality gate, the model
+  returned "best available" thin answers.
+
+## The new design
+
+Orchestration lives in **code**, not in the model. The model is asked to do two
+small, bounded things only.
+
+```
+prompt
+  │
+  ├─ 1. plan_queries    (1 tiny model call + deterministic keyword fallback)
+  │        → a few compact keyword queries
+  │
+  ├─ 2. gather_evidence (pure Python — no model)
+  │        search → dedup → fetch top articles → score → rank
+  │        → keep top K → extract best snippets
+  │        → TOKEN-BUDGETED evidence pack (hard cap)
+  │
+  └─ 3. synthesize      (1 model call)
+           short system prompt + compact evidence → final answer
+```
+
+Key properties:
+
+- **Two model calls total.** No tool-calling loop, no re-research.
+- **Bounded context.** The evidence pack has a hard token budget per profile
+  (`simple` ~1.5k, `standard` ~4k, `deep` ~16k, `max` ~32k). Snippets are
+  trimmed and weak sources dropped to stay under budget. The budget is a hard
+  ceiling, not a target — small questions still produce small packs.
+- **No impossible gates.** Research always returns the *best available*
+  evidence within the profile bounds; it never loops trying to hit a fixed count.
+- **Compact tool output.** The model sees ranked `[S1] title` + short snippets,
+  never raw scoring internals (those stay in diagnostics).
 
 ## Run
 
 ```bash
 uv run python main.py "Design a Redis-backed rate limiter"
-```
-
-```bash
-uv run python main.py --complexity simple --output-mode brief "what is redis?"
-```
-
-```bash
-uv run python main.py --complexity max --output-mode production-plan --research-budget-seconds 300 "design instagram"
-```
-
-```bash
+uv run python main.py --complexity simple "what is redis?"
+uv run python main.py --complexity deep "Design a global Instagram-style feed"
 echo "Design a cache strategy for a social feed" | uv run python main.py
 ```
 
-## Configuration
+Progress lines go to **stderr**, the final answer to **stdout**, so you can
+redirect the answer cleanly:
 
-- `MEDIASCRIBE_BASE_URL`: defaults to `https://mediascribe.b8z.me`
-- `MEDIASCRIBE_TIMEOUT_SECONDS`: defaults to `20`
-- `MEDIASCRIBE_REQUEST_RETRIES`: defaults to `4`
-- `MEDIASCRIBE_RETRY_BASE_SECONDS`: defaults to `1.5`
-- `OPENAI_BASE_URL`: defaults to `http://10.0.0.119:8080/v1`
-- `OPENAI_API_KEY`: defaults to `testing`
-- `OPENAI_MODEL`: defaults to `ggml-org/gemma-4-E2B-it-GGUF:Q8_0`
-- `OPENAI_TEMPERATURE`: defaults to `0.2`
-- `AGENT_DIAGNOSTICS_DIR`: defaults to `diagnostics`
-- `AGENT_PROGRESS_STREAM`: defaults to `stdout`; set to `stderr` if you want progress separate from the final answer.
-- `AGENT_COMPLEXITY`: defaults to `auto`; valid values are `auto`, `simple`, `standard`, `deep`, `max`.
-- `AGENT_OUTPUT_MODE`: defaults to `normal`; valid values are `brief`, `normal`, `detailed`, `interview`, `production-plan`.
-- `AGENT_RESEARCH_BUDGET_SECONDS`: overrides the selected complexity profile.
-- `AGENT_RESEARCH_QUERY_LIMIT`: overrides the selected complexity profile.
-- `AGENT_RESEARCH_SEARCH_LIMIT`: overrides the selected complexity profile.
-- `AGENT_RESEARCH_DEFAULT_ARTICLES`: overrides the selected complexity profile.
-- `AGENT_RESEARCH_MAX_ARTICLES`: overrides the selected complexity profile.
-- `AGENT_RESEARCH_MIN_GOOD_ARTICLES`: overrides the selected complexity profile.
-- `AGENT_RESEARCH_MIN_QUALITY_SCORE`: defaults to `0.35`
-- `AGENT_RESEARCH_MAX_FETCH_ATTEMPTS`: overrides the selected complexity profile.
-- `AGENT_RESEARCH_ARTICLE_DELAY_SECONDS`: defaults to `0.25`
-- `AGENT_RESEARCH_ENFORCEMENT_ATTEMPTS`: overrides the selected complexity profile.
+```bash
+uv run python main.py "design instagram" > answer.md
+```
 
-## Complexity Profiles
+## Configuration (environment variables)
 
-- `simple`: for direct concept questions like `what is redis?`; small lookup, 1 strong article target, 30 second research budget.
-- `standard`: for bounded design decisions; moderate lookup, 4 strong article target, 90 second research budget.
-- `deep`: for normal system design prompts; broad lookup, 8 strong article target, 180 second research budget.
-- `max`: for large-scale product architecture like `design instagram`; full lookup, 16 strong article target, 300 second research budget.
-- `auto`: classifies the prompt locally before the model runs.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MEDIASCRIBE_BASE_URL` | `http://10.0.0.132:9595` | Mediascribe API base |
+| `MEDIASCRIBE_TIMEOUT_SECONDS` | `20` | Per-request timeout |
+| `MEDIASCRIBE_REQUEST_RETRIES` | `3` | Retries on 429/5xx |
+| `OPENAI_BASE_URL` | `http://10.0.0.119:8080/v1` | Model server (OpenAI-compatible) |
+| `OPENAI_API_KEY` | `testing` | Model server key |
+| `OPENAI_MODEL` | `ggml-org/gemma-4-E2B-it-GGUF:Q8_0` | Model name |
+| `OPENAI_TEMPERATURE` | `0.2` | Sampling temperature |
+| `OPENAI_TIMEOUT_SECONDS` | `180` | Model call timeout |
+| `AGENT_COMPLEXITY` | `auto` | `auto`, `simple`, `standard`, `deep` |
+| `AGENT_PROGRESS_STREAM` | `stderr` | `stderr` or `stdout` |
+| `AGENT_DIAGNOSTICS_DIR` | `diagnostics` | Where run diagnostics are written |
 
-## Output Modes
+## Complexity profiles
 
-- `brief`: compact direct answer.
-- `normal`: balanced architecture answer.
-- `detailed`: deeper tradeoffs and operations.
-- `interview`: system-design interview format.
-- `production-plan`: implementation and operations rollout format.
+| Profile | Queries | Fetch | Sources kept | Evidence budget |
+| --- | --- | --- | --- | --- |
+| `simple` | 2 | 3 | 2 | ~1.5k tokens |
+| `standard` | 4 | 6 | 4 | ~4k tokens |
+| `deep` | 8 | 12 | 10 | ~16k tokens |
+| `max` | 12 | 18 | 14 | ~32k tokens |
 
-## CLI Overrides
+`auto` classifies the prompt locally (length + design signals) before running:
+short concept questions → `simple`, design decisions → `standard`, system-design
+prompts → `deep`, and large multi-subsystem specs (≥120 words or many design
+signals, like the Instagram / Google Docs prompts) → `max`.
 
-- `--complexity`: overrides `AGENT_COMPLEXITY`.
-- `--output-mode`: overrides `AGENT_OUTPUT_MODE`.
-- `--research-budget-seconds`: overrides profile and env budget.
-
-## Tools
-
-- `research_mediascribe(primary_query, related_queries, max_articles, min_good_articles, must_cover, language)`: runs multiple Mediascribe searches, deduplicates results, fetches full articles from `/api/public/blogs/{blog_id}`, scores article quality, and keeps searching through candidates until it finds a strong set or exhausts the fetch budget.
-- `list_mediascribe_landing_page(limit)`: reads the landing page feed and section metadata.
-- `get_mediascribe_article(blog_id, language)`: fetches `/api/public/blogs/{blog_id}` and returns full article markdown plus citations.
-- `inspect_mediascribe_blog_page(blog_id)`: checks article metadata and available languages.
-
-## Research Behavior
-
-- The model sees the user question first.
-- The CLI chooses a complexity profile before building the agent.
-- Progress output includes `Complexity: <profile>`.
-- Progress output includes `Output mode: <mode>`.
-- Progress output includes `Research budget: <seconds>s`.
-- The model must call `research_mediascribe` before answering technical questions.
-- The model creates the primary and related search queries for `research_mediascribe`.
-- Search queries should be compact keyword phrases, not full sentences.
-- The tool also keyword-normalizes model queries before calling `/api/search`.
-- Diagnostics include both the original model query and the compact `search_query`.
-- The model also supplies `must_cover` criteria so research can evaluate whether articles are actually useful.
-- Broad architecture questions should use 10 to 14 query angles and fetch 18 to 24 full articles.
-- The CLI rejects attempts that answer without `research_mediascribe` and retries with a stricter instruction.
-- The CLI also rejects thin research when the tool returns fewer solid articles than requested, then forces another pass with sharper model-created queries.
-- Research runs the model-created searches instead of trusting the first query.
-- Research fetches article content, scores quality, accepts solid articles, and continues through candidates when an article is weak.
-- Research stops when the selected budget is exhausted and reports `budget_exhausted`.
-- Research penalizes generic background articles unless they have strong topic-specific evidence.
-- Research returns `recommended_sources` as the preferred citation shortlist.
-- Progress output includes each lookup query and each selected article title.
-- The research pass fetches full article markdown for the best unique results.
-- The diagnostics file stores retry attempts under `research_enforcement`.
-- The diagnostics file stores the selected complexity profile under `configuration.complexity_profile`.
-- The diagnostics file stores output mode and research budget inside the complexity profile.
-- This is tuned for large-context runs. Expect much higher token usage than earlier versions.
-
-## Response Style
-
-- The agent should respond like a technical design architect without literally saying `As an architect,`.
-- Output shape adapts to the question instead of reusing one fixed template.
-- Design answers prioritize decisions, fit, tradeoffs, risks, and implementation details.
-- Mediascribe facts are separated from architectural judgment.
-- Sources are capped to the articles materially used in the final answer, normally `3-8` citations.
-- The agent should prefer `recommended_sources` instead of dumping every article it saw.
-- The agent is instructed to research again if the answer would not meet roughly 90% confidence for correctness, specificity, tradeoffs, and operational realism.
-- System design answers use a broad architecture pattern catalog.
-- Expected coverage includes request/data flow, CDNs, WAFs, gateways, load balancers, rate limiters, retries, timeouts, circuit breakers, caches, queues, PgBouncer, databases, scaling, observability, and failure modes.
-- Example flow: `Browser -> CDN -> WAF -> Gateway -> Load Balancer -> App -> Cache -> Database`.
+Budgets are set here in `agent/config.py` — raise `evidence_token_budget`,
+`max_sources`, or `fetch_articles` per profile if you want to push more into the
+128k window.
 
 ## Diagnostics
 
-- Every run writes `diagnostics/agent-run-<timestamp>.json`.
-- The file includes token usage reported by the model provider, tool calls, tool results, message previews, timing, and runtime configuration.
-- Token counts are `0` when the configured OpenAI-compatible server does not return usage metadata.
+Every run writes `diagnostics/agent-run-<timestamp>.json` with the chosen
+profile, the queries used, research stats (candidates found, articles fetched,
+sources kept, evidence token estimate), the kept sources, and model token usage.
+The files are small (a few KB), unlike the previous multi-run dumps.
+
+## Project layout
+
+```
+main.py                CLI entry point
+agent/
+  config.py            env + complexity profiles + token budgets
+  mediascribe.py       Mediascribe HTTP client (search, fetch_article)
+  llm.py               OpenAI-compatible chat client + robust list parsing
+  research.py          query planning, search/fetch/rank, evidence pack
+  synthesize.py        single-call answer generation
+  pipeline.py          orchestration + diagnostics
+  util.py              progress logging + text helpers
+tests/
+  test_offline.py      unit tests for the pure (non-network) logic
+```
+
+## Tests
+
+Offline unit tests cover the logic that does not touch the network (keyword
+extraction, scoring, snippet selection, token budgeting, complexity
+classification, and the model-output list parser):
+
+```bash
+uv run python -m pytest -q
+```
+
+End-to-end behavior requires the Mediascribe API and the model server to be
+reachable on your network.
