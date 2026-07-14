@@ -410,6 +410,57 @@ def research_terms(*values: Any) -> list[str]:
     return terms
 
 
+GENERIC_TITLE_MARKERS = {
+    "ai proof",
+    "any system",
+    "blogs",
+    "concepts",
+    "explained",
+    "hard",
+    "interview",
+    "mistakes",
+    "popular",
+    "should know",
+    "tips",
+    "wrong",
+}
+
+
+def is_generic_article_title(title: str) -> bool:
+    title_lower = title.lower()
+    return any(marker in title_lower for marker in GENERIC_TITLE_MARKERS)
+
+
+def recommended_sources(articles: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    candidates = []
+    seen = set()
+    for article in articles:
+        citation_value = article.get("citation")
+        if not citation_value or citation_value in seen:
+            continue
+        seen.add(citation_value)
+        quality = article.get("quality") if isinstance(article.get("quality"), dict) else {}
+        candidates.append(
+            {
+                "title": article.get("title"),
+                "citation": citation_value,
+                "quality_score": quality.get("quality_score"),
+                "topic_specificity": quality.get("topic_specificity"),
+                "matched_search_query": article.get("matched_search_query"),
+                "coverage_hits": quality.get("coverage_hits", [])[:5],
+            }
+        )
+
+    return sorted(
+        candidates,
+        key=lambda item: (
+            float(item.get("topic_specificity") or 0),
+            float(item.get("quality_score") or 0),
+        ),
+        reverse=True,
+    )[:limit]
+
+
 def score_article_quality(
     article: dict[str, Any],
     matched_query: str,
@@ -418,14 +469,26 @@ def score_article_quality(
 ) -> dict[str, Any]:
     title = str(article.get("title") or "")
     markdown = str(article.get("markdown") or "")
-    combined = f"{title}\n{article.get('mediascribe_section') or ''}\n{
-        markdown
-    }".lower()
+    combined = f"{title}\n{article.get('mediascribe_section') or ''}\n{markdown}".lower()
     title_lower = title.lower()
     front_matter = f"{title}\n{markdown[:1200]}".lower()
     terms = research_terms(matched_query, all_queries, must_cover)
     matched_terms = [term for term in terms if term in combined]
     title_matches = [term for term in terms if term in title_lower]
+    specific_title_matches = [
+        term
+        for term in title_matches
+        if term
+        not in {
+            "architecture",
+            "concepts",
+            "design",
+            "interview",
+            "patterns",
+            "system",
+            "systems",
+        }
+    ]
     front_matter_matches = [term for term in terms if term in front_matter]
     coverage_hits = []
     exact_phrase_hits = []
@@ -468,20 +531,46 @@ def score_article_quality(
 
     if must_cover:
         required_coverage_hits = min(len(must_cover), 3)
+        topic_specificity = max(
+            min(len(exact_phrase_hits) / 2, 1.0),
+            min(len(query_phrase_hits) / 2, 1.0),
+            min(len(specific_title_matches) / 3, 1.0),
+            1.0
+            if (
+                coverage_score >= 0.5
+                and len(specific_title_matches) >= 1
+                and len(front_matter_matches) >= 6
+            )
+            else 0.0,
+            1.0 if coverage_score >= 0.6 and len(front_matter_matches) >= 6 else 0.0,
+        )
+        coverage_gate = len(coverage_hits) >= required_coverage_hits or (
+            coverage_score >= 0.5
+            and len(specific_title_matches) >= 1
+            and len(front_matter_matches) >= 6
+        )
         topic_gate = (
             bool(exact_phrase_hits)
             or bool(query_phrase_hits)
             or (len(front_matter_matches) >= 5 and coverage_score >= 0.5)
             or (len(title_matches) >= 2 and coverage_score >= 0.5)
         )
-        relevance_gate = len(coverage_hits) >= required_coverage_hits and topic_gate
+        relevance_gate = (
+            coverage_gate
+            and topic_gate
+            and (not is_generic_article_title(title) or topic_specificity >= 0.75)
+        )
     else:
+        topic_specificity = min(len(specific_title_matches) / 3, 1.0)
         relevance_gate = bool(title_matches) or term_score >= 0.25
 
     return {
         "quality_score": round(score, 4),
+        "topic_specificity": round(topic_specificity, 4),
+        "generic_title": is_generic_article_title(title),
         "matched_terms": matched_terms[:20],
         "title_matches": title_matches[:10],
+        "specific_title_matches": specific_title_matches[:10],
         "front_matter_matches": front_matter_matches[:10],
         "coverage_hits": coverage_hits,
         "exact_phrase_hits": exact_phrase_hits,
@@ -775,11 +864,26 @@ def perform_mediascribe_research(
             payload["fallback_weak_article"] = True
             articles.append(payload)
 
+    solid_articles = [
+        article for article in articles if article.get("quality", {}).get("is_solid")
+    ]
+    source_shortlist = recommended_sources(
+        solid_articles if solid_articles else articles,
+        limit=8,
+    )
+
     return {
         "queries": original_queries,
         "search_queries": search_queries,
         "search_runs": search_runs,
         "articles": articles,
+        "recommended_sources": source_shortlist,
+        "source_policy": (
+            "Use only recommended_sources for the final Sources section unless a "
+            "non-recommended article directly supports a specific claim. Cite 3 to "
+            "8 sources maximum, prefer topic-specific articles, and do not cite "
+            "generic background articles unless they are explicitly used."
+        ),
         "rejected_articles": rejected_articles,
         "article_errors": article_errors,
         "quality_requirements": {
@@ -791,6 +895,7 @@ def perform_mediascribe_research(
             "solid_articles": sum(
                 1 for article in articles if article.get("quality", {}).get("is_solid")
             ),
+            "recommended_source_count": len(source_shortlist),
         },
         "selection_strategy": (
             "Fetched candidate articles iteratively. Each article was scored against "
@@ -1168,6 +1273,10 @@ Answer policy:
 - For short-answer requests, keep the answer short and skip formal sections unless they add clarity.
 - Separate Mediascribe-sourced facts from your architectural judgment.
 - End with a "Sources" section.
+- In "Sources", cite only articles that directly support claims in the final answer.
+- Prefer research_mediascribe.recommended_sources for citations.
+- Use 3 to 8 sources maximum unless the user explicitly asks for exhaustive sourcing.
+- Do not cite rejected articles, generic background articles, or articles you did not materially use.
 - In "Sources", copy the citation field exactly for every Mediascribe article used.
 - Be direct and production-oriented.
 - State uncertainty when Mediascribe does not cover a requested detail.

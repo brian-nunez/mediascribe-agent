@@ -59,6 +59,8 @@ echo "Design a cache strategy for a social feed" | uv run python main.py
 - The CLI also rejects thin research when the tool returns fewer solid articles than requested, then forces another pass with sharper model-created queries.
 - Research runs the model-created searches instead of trusting the first query.
 - Research fetches article content, scores quality, accepts solid articles, and continues through candidates when an article is weak.
+- Research penalizes generic background articles unless they have strong topic-specific evidence.
+- Research returns `recommended_sources` as the preferred citation shortlist.
 - Progress output includes each lookup query and each selected article title.
 - The research pass fetches full article markdown for the best unique results.
 - The diagnostics file stores retry attempts under `research_enforcement`.
@@ -70,6 +72,8 @@ echo "Design a cache strategy for a social feed" | uv run python main.py
 - Output shape adapts to the question instead of reusing one fixed template.
 - Design answers prioritize decisions, fit, tradeoffs, risks, and implementation details.
 - Mediascribe facts are separated from architectural judgment.
+- Sources are capped to the articles materially used in the final answer, normally `3-8` citations.
+- The agent should prefer `recommended_sources` instead of dumping every article it saw.
 - The agent is instructed to research again if the answer would not meet roughly 90% confidence for correctness, specificity, tradeoffs, and operational realism.
 - System design answers use a broad architecture pattern catalog.
 - Expected coverage includes request/data flow, CDNs, WAFs, gateways, load balancers, rate limiters, retries, timeouts, circuit breakers, caches, queues, PgBouncer, databases, scaling, observability, and failure modes.
