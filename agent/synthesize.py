@@ -53,7 +53,11 @@ def synthesize(prompt: str, evidence: EvidencePack, profile: Profile) -> llm.Cha
     if profile.name in ("standard", "deep", "max"):
         parts += ["", _DESIGN_CHECKLIST]
     if profile.answer_requirements:
-        parts += ["", "Make sure to address: " + ", ".join(profile.answer_requirements) + "."]
+        parts += [
+            "",
+            "Make sure to address: " +
+            ", ".join(profile.answer_requirements) + ".",
+        ]
     parts += [
         "",
         "Mediascribe evidence (cite with the bracketed ids):",

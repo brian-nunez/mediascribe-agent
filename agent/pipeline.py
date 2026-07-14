@@ -96,8 +96,11 @@ def run(prompt: str, requested_complexity: str | None = None) -> RunResult:
     }
     path = _write_diagnostics(diagnostics)
     progress(
-        f"done in {elapsed}s | evidence ~{usage['evidence_tokens_estimated']} tok "
-        f"| synth in={usage['synthesis_input_tokens']} out={usage['synthesis_output_tokens']}"
+        f"done in {elapsed}s | evidence ~{
+            usage['evidence_tokens_estimated']} tok "
+        f"| synth in={usage['synthesis_input_tokens']} out={
+            usage['synthesis_output_tokens']
+        }"
     )
     progress(f"diagnostics: {path}")
 
@@ -114,5 +117,6 @@ def _write_diagnostics(diagnostics: dict) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = directory / f"agent-run-{stamp}.json"
-    path.write_text(json.dumps(diagnostics, indent=2, ensure_ascii=False), "utf-8")
+    path.write_text(json.dumps(diagnostics, indent=2,
+                    ensure_ascii=False), "utf-8")
     return path

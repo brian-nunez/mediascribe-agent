@@ -88,7 +88,7 @@ def extract_string_list(text: str, max_items: int = 12) -> list[str]:
     start = search_space.find("[")
     end = search_space.rfind("]")
     if start != -1 and end != -1 and end > start:
-        blob = search_space[start : end + 1]
+        blob = search_space[start: end + 1]
         try:
             parsed = json.loads(blob)
             if isinstance(parsed, list):

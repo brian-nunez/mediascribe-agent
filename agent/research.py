@@ -17,13 +17,77 @@ from .mediascribe import Article, SearchHit, fetch_article, search
 from .util import progress, truncate
 
 _STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do", "for",
-    "from", "how", "i", "if", "in", "into", "is", "it", "its", "me", "my", "need",
-    "of", "on", "or", "so", "that", "the", "then", "there", "this", "to", "up",
-    "use", "using", "want", "was", "we", "what", "when", "where", "which", "who",
-    "why", "will", "with", "you", "your", "give", "design", "build", "make",
-    "assume", "system", "app", "application", "like", "must", "should", "have",
-    "has", "get", "info", "would", "could", "also", "very", "high", "low",
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "but",
+    "by",
+    "can",
+    "do",
+    "for",
+    "from",
+    "how",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "me",
+    "my",
+    "need",
+    "of",
+    "on",
+    "or",
+    "so",
+    "that",
+    "the",
+    "then",
+    "there",
+    "this",
+    "to",
+    "up",
+    "use",
+    "using",
+    "want",
+    "was",
+    "we",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "will",
+    "with",
+    "you",
+    "your",
+    "give",
+    "design",
+    "build",
+    "make",
+    "assume",
+    "system",
+    "app",
+    "application",
+    "like",
+    "must",
+    "should",
+    "have",
+    "has",
+    "get",
+    "info",
+    "would",
+    "could",
+    "also",
+    "very",
+    "high",
+    "low",
 }
 
 _WORD = re.compile(r"[a-z0-9]+(?:[-+][a-z0-9]+)*")
@@ -83,7 +147,8 @@ def plan_queries(prompt: str, profile: Profile) -> list[str]:
                     "role": "user",
                     "content": (
                         f"Give up to {profile.num_queries} keyword search "
-                        f"queries for this question:\n\n{truncate(prompt, 1500)}"
+                        f"queries for this question:\n\n{
+                            truncate(prompt, 1500)}"
                     ),
                 },
             ],
@@ -160,7 +225,9 @@ def score_article(article: Article, terms: set[str]) -> float:
     return round(0.55 * term_score + 0.20 * title_score + 0.25 * length_score, 4)
 
 
-def best_snippets(article: Article, terms: set[str], count: int, max_chars: int) -> list[str]:
+def best_snippets(
+    article: Article, terms: set[str], count: int, max_chars: int
+) -> list[str]:
     """Pick the most on-topic sections and return short excerpts."""
     scored: list[tuple[int, str, str]] = []
     for heading, body in split_sections(article.markdown or ""):
@@ -178,7 +245,8 @@ def best_snippets(article: Article, terms: set[str], count: int, max_chars: int)
         label = f"{heading}: " if heading else ""
         snippets.append(f"{label}{excerpt}".strip())
     if not snippets:
-        snippets = [truncate(" ".join((article.markdown or "").split()), max_chars)]
+        snippets = [
+            truncate(" ".join((article.markdown or "").split()), max_chars)]
     return snippets
 
 
@@ -269,7 +337,8 @@ def gather_evidence(prompt: str, profile: Profile) -> EvidencePack:
             if existing is None or hit.score > existing.score:
                 candidates[hit.blog_id] = hit
 
-    ranked_hits = sorted(candidates.values(), key=lambda h: h.score, reverse=True)
+    ranked_hits = sorted(candidates.values(),
+                         key=lambda h: h.score, reverse=True)
 
     # Fetch the top candidates and score them.
     scored: list[Source] = []
@@ -287,14 +356,19 @@ def gather_evidence(prompt: str, profile: Profile) -> EvidencePack:
         if len((article.markdown or "").strip()) < 400:
             continue  # empty / stub article, nothing to cite
         score = score_article(article, terms)
-        scored.append(Source(source_id="", article=article, score=score, snippets=[]))
+        scored.append(Source(source_id="", article=article,
+                      score=score, snippets=[]))
 
     scored.sort(key=lambda s: s.score, reverse=True)
     kept = scored[: profile.max_sources]
 
     # Build snippets for the kept sources.
-    snippet_chars = max(160, profile.evidence_token_budget * config.CHARS_PER_TOKEN
-                        // max(profile.max_sources * profile.snippets_per_article, 1))
+    snippet_chars = max(
+        160,
+        profile.evidence_token_budget
+        * config.CHARS_PER_TOKEN
+        // max(profile.max_sources * profile.snippets_per_article, 1),
+    )
     # Large-budget profiles get richer per-snippet excerpts, not just more sources.
     snippet_cap = 1400 if profile.evidence_token_budget >= 10_000 else 600
     for source in kept:
@@ -320,8 +394,6 @@ def gather_evidence(prompt: str, profile: Profile) -> EvidencePack:
             "\n\n".join(source.to_text() for source in kept)
         ),
     }
-    progress(
-        f"evidence ready: {len(kept)} sources, "
-        f"~{stats['evidence_tokens']} tokens"
-    )
+    progress(f"evidence ready: {len(kept)} sources, ~{
+             stats['evidence_tokens']} tokens")
     return EvidencePack(sources=kept, queries=queries, stats=stats)

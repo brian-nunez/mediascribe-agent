@@ -98,7 +98,8 @@ def _json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def search(query: str, limit: int) -> list[SearchHit]:
     """Run one keyword search. Returns normalized hits (may be empty)."""
-    payload = _json("/api/search", {"q": query, "limit": max(1, min(limit, 20))})
+    payload = _json("/api/search", {"q": query,
+                    "limit": max(1, min(limit, 20))})
     hits: list[SearchHit] = []
     for item in payload.get("results", []):
         if not isinstance(item, dict):

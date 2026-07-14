@@ -6,4 +6,5 @@ do two small, bounded things: propose search queries and write the final
 answer. See README.md for the full design rationale.
 """
 
-__all__ = ["config", "mediascribe", "llm", "research", "synthesize", "pipeline"]
+__all__ = ["config", "mediascribe", "llm",
+           "research", "synthesize", "pipeline"]

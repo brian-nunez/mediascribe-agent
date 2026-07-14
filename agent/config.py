@@ -39,10 +39,12 @@ MEDIASCRIBE_BASE_URL = _env_str(
 ).rstrip("/")
 MEDIASCRIBE_TIMEOUT_SECONDS = _env_float("MEDIASCRIBE_TIMEOUT_SECONDS", 20.0)
 MEDIASCRIBE_RETRIES = _env_int("MEDIASCRIBE_REQUEST_RETRIES", 3)
-MEDIASCRIBE_RETRY_BASE_SECONDS = _env_float("MEDIASCRIBE_RETRY_BASE_SECONDS", 1.5)
+MEDIASCRIBE_RETRY_BASE_SECONDS = _env_float(
+    "MEDIASCRIBE_RETRY_BASE_SECONDS", 1.5)
 
 # --- Model (OpenAI-compatible server) --------------------------------------
-MODEL_BASE_URL = _env_str("OPENAI_BASE_URL", "http://10.0.0.119:8080/v1").rstrip("/")
+MODEL_BASE_URL = _env_str(
+    "OPENAI_BASE_URL", "http://10.0.0.119:8080/v1").rstrip("/")
 MODEL_API_KEY = _env_str("OPENAI_API_KEY", "testing")
 MODEL_NAME = _env_str("OPENAI_MODEL", "ggml-org/gemma-4-E2B-it-GGUF:Q8_0")
 MODEL_TEMPERATURE = _env_float("OPENAI_TEMPERATURE", 0.2)
@@ -70,11 +72,11 @@ class Profile:
     """A complexity profile. Every field bounds the work we do."""
 
     name: str
-    num_queries: int          # total search queries (deterministic + model)
-    search_limit: int         # results requested per search
-    fetch_articles: int       # max full articles to fetch and score
-    max_sources: int          # articles kept in the evidence pack shown to model
-    snippets_per_article: int # evidence snippets kept per kept article
+    num_queries: int  # total search queries (deterministic + model)
+    search_limit: int  # results requested per search
+    fetch_articles: int  # max full articles to fetch and score
+    max_sources: int  # articles kept in the evidence pack shown to model
+    snippets_per_article: int  # evidence snippets kept per kept article
     evidence_token_budget: int  # hard cap on evidence-pack size (model input)
     answer_guidance: str
     answer_requirements: list[str] = field(default_factory=list)
@@ -93,7 +95,8 @@ PROFILES: dict[str, Profile] = {
             "Answer the concept directly and concisely: what it is, where it "
             "fits, when to use it, and the main tradeoffs. No heavy sections."
         ),
-        answer_requirements=["direct answer", "where it fits", "tradeoffs", "sources"],
+        answer_requirements=["direct answer",
+                             "where it fits", "tradeoffs", "sources"],
     ),
     "standard": Profile(
         name="standard",
